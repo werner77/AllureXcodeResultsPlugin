@@ -1,0 +1,6 @@
+id: xcode
+name: Xcode Results Plugin
+description: The plugin that adds support for results in Xcode's results.bundle data format.
+extensions:
+  - XcodeResultsBundlePlugin
+
