@@ -1,6 +1,6 @@
-id: xcode
+id: xcode-results
 name: Xcode Results Plugin
 description: The plugin that adds support for results in Xcode's results.bundle data format.
 extensions:
-  - XcodeResultsBundlePlugin
+  - com.behindmedia.allure.plugin.xcode.XcodeResultsBundlePlugin
 

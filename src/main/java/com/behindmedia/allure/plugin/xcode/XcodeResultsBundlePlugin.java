@@ -6,7 +6,6 @@ import io.qameta.allure.core.ResultsVisitor;
 import io.qameta.allure.entity.*;
 import org.apache.commons.configuration2.ex.ConfigurationException;
 import org.apache.commons.configuration2.plist.XMLPropertyListConfiguration;
-import org.apache.commons.io.IOUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,7 +45,7 @@ public class XcodeResultsBundlePlugin implements Reader {
 
     private void processTestSummaries(final Path parsedFile, final ResultsVisitor visitor) {
         try {
-            LOGGER.debug("Parsing file {}", parsedFile);
+            LOGGER.info("Parsing file {}", parsedFile);
 
             XMLPropertyListConfiguration plist = readPlist(parsedFile.toFile());
             List<XMLPropertyListConfiguration> testSummaries = plist.getList(XMLPropertyListConfiguration.class, "TestableSummaries", Collections.emptyList());
@@ -111,16 +110,15 @@ public class XcodeResultsBundlePlugin implements Reader {
             result.addLabelIfNotExists(LabelName.PACKAGE, testGroup);
         }
 
-        final String testStatus = testConfig.getString("TestStatus");
         final String testGUID = testConfig.getString("TestSummaryGUID");
 
         result.setUid(testGUID);
-        result.setStatus(ParserUtils.getStatus(testStatus));
         result.setFlaky(ParserUtils.isFlaky(testConfig));
 
         final List<XMLPropertyListConfiguration> activities = testConfig.getList(XMLPropertyListConfiguration.class, "ActivitySummaries", Collections.emptyList());
+        final List<Step> failedSteps = new ArrayList<>();
 
-        final ActivityResult activityResult = processActivities(activities, parsedFile, visitor);
+        final ActivityResult activityResult = processActivities(activities, failedSteps, parsedFile, visitor);
         final List<Step> steps = activityResult.getSteps();
         final Status status = activityResult.getStatus();
 
@@ -148,31 +146,26 @@ public class XcodeResultsBundlePlugin implements Reader {
 
         result.setTime(testTime);
         result.setTestStage(stageResult);
+        result.setStatus(stageResult.getStatus());
 
         final StringBuilder builder = new StringBuilder();
 
-        List<XMLPropertyListConfiguration> failureConfigs = testConfig.getList(XMLPropertyListConfiguration.class, "FailureSummaries", Collections.emptyList());
-        failureConfigs.forEach(failureConfig -> {
-            final String fileName = failureConfig.getString("FileName");
-            final String message = failureConfig.getString("Message");
-            final String lineNumber = failureConfig.getString("LineNumber");
-            final Boolean performanceFailure = failureConfig.getBoolean("PerformanceFailure", false);
-
-            final String failureMessage = performanceFailure ? "Performance failure: " : "Failure: " + message + " (" + fileName + ":" + lineNumber + ")";
+        failedSteps.forEach(step -> {
+            final String failureMessage = step.getStatusMessage();
+            if (builder.length() > 0) {
+                builder.append("\n\n");
+            }
 
             builder.append(failureMessage);
-            builder.append("\n");
         });
 
-        if (builder.length() == 0) {
-            builder.append("Success");
+        if (builder.length() > 0) {
+            result.setStatusMessage(builder.toString());
         }
-        result.setStatusMessage(builder.toString());
-
         visitor.visitTestResult(result);
     }
 
-    private ActivityResult processActivities(final List<XMLPropertyListConfiguration> activities, final Path parsedFile, final ResultsVisitor visitor) {
+    private ActivityResult processActivities(final List<XMLPropertyListConfiguration> activities, final List<Step> failedSteps, final Path parsedFile, final ResultsVisitor visitor) {
 
         List<Step> allSteps = new ArrayList<>();
         Status effectiveStatus = Status.PASSED;
@@ -182,23 +175,23 @@ public class XcodeResultsBundlePlugin implements Reader {
         for (XMLPropertyListConfiguration activityConfig: activities) {
 
             final String activityType = activityConfig.getString("ActivityType");
+            final boolean isAssertionFailure = "com.apple.dt.xctest.activity-type.testAssertionFailure".equals(activityType);
+            final boolean isCrash = activityConfig.getString("DiagnosticReportFileName", null) != null;
 
             final List<XMLPropertyListConfiguration> attachmentConfigs = activityConfig.getList(XMLPropertyListConfiguration.class, "Attachments", Collections.emptyList());
 
             final Double startTime = activityConfig.getDouble("StartTimeInterval");
-            final Double endTime = activityConfig.getDouble("FinishTimeInterval");
-            final String activityUUID = activityConfig.getString("UUID");
+            final Double endTime = activityConfig.getDouble("FinishTimeInterval", startTime);
             final String title = activityConfig.getString("Title");
 
             final Step step = new Step();
             step.setTime(ParserUtils.getTime(startTime, endTime - startTime));
-            step.setName(activityUUID);
-            step.setStatusMessage(title);
+            step.setName(title);
 
             List<XMLPropertyListConfiguration> subActivities = activityConfig.getList(XMLPropertyListConfiguration.class, "SubActivities", Collections.emptyList());
-            ActivityResult subResult = processActivities(subActivities, parsedFile, visitor);
+            ActivityResult subResult = processActivities(subActivities, failedSteps, parsedFile, visitor);
 
-            step.setSteps(subResult.steps);
+            step.setSteps(subResult.getSteps());
 
             final List<Attachment> attachments = attachmentConfigs.stream().flatMap(attachmentConfig -> {
                 final String filename = attachmentConfig.getString("Filename");
@@ -212,16 +205,28 @@ public class XcodeResultsBundlePlugin implements Reader {
 
             final Status activityStatus;
 
-            if ("com.apple.dt.xctest.activity-type.testAssertionFailure".equals(activityType)) {
+            if (isCrash) {
                 activityStatus = Status.FAILED;
+                step.setStatusMessage(title);
+                failedSteps.add(step);
+            } else if (isAssertionFailure) {
+                activityStatus = Status.BROKEN;
+                step.setStatusMessage(title);
+                failedSteps.add(step);
             } else if (!step.getSteps().isEmpty()) {
-                activityStatus = subResult.status;
+                activityStatus = subResult.getStatus();
             } else {
                 activityStatus = Status.PASSED;
             }
 
             step.setStatus(activityStatus);
-            effectiveStatus = activityStatus == Status.FAILED ? activityStatus : effectiveStatus;
+
+            if (activityStatus == Status.FAILED) {
+                effectiveStatus = Status.FAILED;
+            } else if (activityStatus == Status.BROKEN && effectiveStatus != Status.FAILED) {
+                effectiveStatus = Status.BROKEN;
+            }
+            allSteps.add(step);
         }
 
         return new ActivityResult(effectiveStatus, allSteps);
@@ -229,14 +234,10 @@ public class XcodeResultsBundlePlugin implements Reader {
 
 
     private static XMLPropertyListConfiguration readPlist(File file) throws IOException, ConfigurationException {
-        BufferedReader reader = null;
-        try {
-            reader = new BufferedReader(new FileReader(file));
+        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
             XMLPropertyListConfiguration plist = new XMLPropertyListConfiguration();
             plist.read(reader);
             return plist;
-        } finally {
-            IOUtils.closeQuietly(reader);
         }
     }
 

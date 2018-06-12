@@ -5,6 +5,7 @@ import io.qameta.allure.entity.Time;
 import org.apache.commons.configuration2.plist.XMLPropertyListConfiguration;
 
 import java.math.BigDecimal;
+import java.util.Objects;
 
 import static java.util.Objects.nonNull;
 
@@ -34,16 +35,16 @@ class ParserUtils {
     }
 
     static Status getStatus(final String testStatus) {
-        if (testStatus.equals("Failure")) {
+        if (Objects.isNull(testStatus)) {
+            return Status.UNKNOWN;
+        }
+        if ("Success".equals(testStatus)) {
+            return Status.PASSED;
+        }
+        if ("Failure".equals(testStatus)) {
             return Status.FAILED;
         }
-        if (testStatus.equals("Error")) {
-            return Status.BROKEN;
-        }
-        if (testStatus.equals("Skipped")) {
-            return Status.SKIPPED;
-        }
-        return Status.PASSED;
+        return Status.UNKNOWN;
     }
 
     static boolean isFlaky(final XMLPropertyListConfiguration testConfig) {
