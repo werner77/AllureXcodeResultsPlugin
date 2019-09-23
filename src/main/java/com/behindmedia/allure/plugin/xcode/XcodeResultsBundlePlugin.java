@@ -176,9 +176,12 @@ public class XcodeResultsBundlePlugin implements Reader {
 
             final String activityType = activityConfig.getString("ActivityType");
             final boolean isAssertionFailure = "com.apple.dt.xctest.activity-type.testAssertionFailure".equals(activityType);
-            final boolean isCrash = activityConfig.getString("DiagnosticReportFileName", null) != null;
 
             final List<XMLPropertyListConfiguration> attachmentConfigs = activityConfig.getList(XMLPropertyListConfiguration.class, "Attachments", Collections.emptyList());
+
+            final boolean isCrash = activityConfig.getString("DiagnosticReportFileName", null) != null || attachmentConfigs.stream().anyMatch(
+                config -> config.getString("Name", "").equals("kXCTAttachmentLegacyDiagnosticReportData")
+            );
 
             final Double startTime = activityConfig.getDouble("StartTimeInterval");
             final Double endTime = activityConfig.getDouble("FinishTimeInterval", startTime);
